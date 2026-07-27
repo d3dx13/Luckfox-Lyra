@@ -110,6 +110,14 @@ docker run --rm -it <dockerhub_user>/luckfox_lyra:latest bash
   `kernel-6.1/arch/arm/configs/rk3506-uvc-camera.config`
   (`CONFIG_MEDIA_USB_SUPPORT`, `CONFIG_VIDEO_DEV`, `CONFIG_VIDEO_V4L2`,
   `CONFIG_USB_VIDEO_CLASS` и пр.);
+- **сохраняет USB-гаджет (RNDIS+ADB) на порту USB-C**: фрагмент
+  `kernel-6.1/arch/arm/configs/rk3506-usb-dualrole.config`
+  (`CONFIG_USB_GADGET=y`, `CONFIG_USB_DWC2_DUAL_ROLE=y`, configfs, rndis, f_fs).
+  `rk3506-usb-host.config` ставит DWC2 в host-only, при котором гаджету не на
+  чем работать и плата перестаёт определяться на ПК; оба порта на RK3506 —
+  DWC2, поэтому dual-role даёт одновременно гаджет на USB-C (otg0,
+  `dr_mode="peripheral"`) и host для камеры на разъёме MX1.25 4P (otg1,
+  `dr_mode="host"`);
 - **выключает DSI (дисплей)**: добавляется фрагмент
   `kernel-6.1/arch/arm/configs/rk3506-no-display.config`
   (`# CONFIG_DRM is not set`) — DRM включается базовым defconfig, поэтому
@@ -117,7 +125,16 @@ docker run --rm -it <dockerhub_user>/luckfox_lyra:latest bash
   недостаточно; плюс ноды `&dsi`, `&dsi_dphy`, `&dsi_in_vop`, `&route_dsi`,
   `&vop` в `kernel-6.1/arch/arm/boot/dts/rk3506g-luckfox-lyra-sd.dts`
   переводятся в `disabled` (display-ноды после этого вообще выпадают из
-  итогового dtb как нессылаемые).
+  итогового dtb как нессылаемые);
+- **добавляет htop в rootfs**: `BR2_PACKAGE_HTOP=y` дописывается в
+  `buildroot/configs/rockchip_rk3506_luckfox_defconfig` (ncurses уже
+  присутствует в образе, дополнительных зависимостей не требуется);
+- **включает UART1 на пинах RM_IO30 (TX) / RM_IO31 (RX)**: в overlay
+  `device/rockchip/common/overlays/rootfs/luckfox-lyra/etc/luckfox.cfg`
+  прописываются `UART1_STATUS=1`, `UART1_TX_RM_IO=30`, `UART1_RX_RM_IO=31`;
+  при загрузке `luckfox-config load` (`S99luckfoxconfigload`) накладывает
+  runtime-dtbo: включает uart1 и роутит его на пины GPIO1_D2 (TX) /
+  GPIO1_D3 (RX) — в системе появляется `/dev/ttyS1`.
 
 Команды:
 
@@ -126,6 +143,11 @@ docker run --rm -it <dockerhub_user>/luckfox_lyra:latest bash
   итоговые файлы (`update.img`, `boot.img`,
   `rootfs.img`, `MiniLoaderAll.bin`, `parameter.txt`, …) кладутся в текущую
   папку **с заменой**;
+- `just update` — сборка + прошивка устройства: сначала выполняется
+  `just build` (все модификации), затем плата переводится в loader mode
+  по ssh (алиас `lyra` — кнопка BOOT не нужна) и свежий `update.img`
+  шьётся через `upgrade_tool` (через sudo; если sudo без пароля недоступен —
+  через privileged docker: `upgrade_tool` статический, пароль не нужен);
 - `just setup` — собрать сборочный образ `luckfox_lyra-build:250815`
   (зависимости поверх базового; вызывается из `just build` автоматически);
 - `just shell` — интерактивный шелл в сборочном окружении (для отладки);

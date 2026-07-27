@@ -26,6 +26,8 @@ sdk_dir     := "/opt/luckfox-lyra-sdk"
 sdk_volume  := "luckfox_lyra_sdk"
 board       := "luckfox_lyra_buildroot_sdmmc_defconfig"
 dts         := "rk3506g-luckfox-lyra-sd.dts"
+# ssh-алиас платы (из ~/.ssh/config) — используется рецептом update
+device      := "lyra"
 
 # по умолчанию — список рецептов
 default:
@@ -64,8 +66,10 @@ build: setup
     cd {{sdk_dir}}
 
     BOARD_CFG=device/rockchip/rk3506/{{board}}
+    BRCFG=buildroot/configs/rockchip_rk3506_luckfox_defconfig
     FRAG=kernel-6.1/arch/arm/configs/rk3506-uvc-camera.config
     FRAG_NODISP=kernel-6.1/arch/arm/configs/rk3506-no-display.config
+    FRAG_DR=kernel-6.1/arch/arm/configs/rk3506-usb-dualrole.config
     DTS=kernel-6.1/arch/arm/boot/dts/{{dts}}
 
     # --- 1. Драйвер USB-камеры (UVC/V4L2) ---
@@ -82,6 +86,24 @@ build: setup
     CONFIG_USB_VIDEO_CLASS_INPUT_EVDEV=y
     EOF
 
+    # --- 1b. USB dual-role: гаджет (RNDIS+ADB) на USB-C и host для камеры ---
+    # rk3506-usb-host.config ставит DWC2_HOST=y (host-only), из-за чего на
+    # порту USB-C (otg0, dr_mode="peripheral") не работает USB-гаджет и плата
+    # не появляется в lsusb/ncm/adb на ПК. На RK3506 оба порта — DWC2, поэтому
+    # переводим драйвер в dual-role: otg0 (peripheral, USB-C) поднимает
+    # RNDIS+ADB, otg1 (host, MX1.25 4P) обслуживает камеру. Гаджет собираем
+    # встроенным (=y), чтобы не зависеть от загрузки модулей.
+    cat > "$FRAG_DR" <<'EOF'
+    # USB gadget (RNDIS+ADB) on USB-C + host for camera on second port
+    CONFIG_USB_GADGET=y
+    CONFIG_USB_DWC2_DUAL_ROLE=y
+    CONFIG_USB_CONFIGFS=y
+    CONFIG_USB_CONFIGFS_RNDIS=y
+    CONFIG_USB_CONFIGFS_F_FS=y
+    CONFIG_USB_F_RNDIS=y
+    CONFIG_USB_F_FS=y
+    EOF
+
     # --- 2. Выключение DSI (дисплея) ---
     # DRM включается базовым defconfig (а не только фрагментом rk3506-display.config),
     # поэтому отключаем его отдельным фрагментом — драйверов дисплея в ядре не будет.
@@ -89,7 +111,7 @@ build: setup
     # No display/DSI on this board
     # CONFIG_DRM is not set
     EOF
-    sed -i 's|^RK_KERNEL_CFG_FRAGMENTS=.*|RK_KERNEL_CFG_FRAGMENTS="rk3506-usb-host.config rk3506-uvc-camera.config rk3506-no-display.config"|' "$BOARD_CFG"
+    sed -i 's|^RK_KERNEL_CFG_FRAGMENTS=.*|RK_KERNEL_CFG_FRAGMENTS="rk3506-usb-host.config rk3506-usb-dualrole.config rk3506-uvc-camera.config rk3506-no-display.config"|' "$BOARD_CFG"
     # Плюс гасим display-ноды в dts (переопределение в конце файла перекрывает
     # ранние "okay") — надёжность на случай, если драйверы всё же окажутся в ядре.
     grep -q 'DSI disabled by justfile' "$DTS" || cat >> "$DTS" <<'EOF'
@@ -128,6 +150,29 @@ build: setup
     sed -i 's|^BR2_GNU_MIRROR=.*|BR2_GNU_MIRROR="https://ftp.gnu.org/gnu"|' \
       buildroot/configs/rockchip/base/common.config
 
+    # --- 3b. htop в rootfs ---
+    grep -q '^BR2_PACKAGE_HTOP=y' "$BRCFG" || \
+      echo 'BR2_PACKAGE_HTOP=y' >> "$BRCFG"
+
+    # --- 3c. UART1 на пинах RM_IO30 (TX) / RM_IO31 (RX) через /etc/luckfox.cfg ---
+    # При загрузке luckfox-config load (S99luckfoxconfigload) читает эти ключи
+    # и накладывает runtime-dtbo: включает uart1 и роутит его на пины
+    # GPIO1_D2 (TX) / GPIO1_D3 (RX). Upsert по ключам, другие настройки
+    # в файле сохраняются.
+    CFG_OVR=device/rockchip/common/overlays/rootfs/luckfox-lyra/etc/luckfox.cfg
+    touch "$CFG_OVR"
+    # TP/I2C2-ключи — слепок текущего /etc/luckfox.cfg с реальной платы,
+    # чтобы прошивка не затирала эти настройки.
+    for kv in UART1_STATUS=1 UART1_RX_RM_IO=31 UART1_TX_RM_IO=30 \
+              TP_STATUS=1 I2C2_STATUS=1 I2C2_SCL_RM_IO=1 I2C2_SDA_RM_IO=0; do
+      key="${kv%%=*}"
+      if grep -q "^$key=" "$CFG_OVR"; then
+        sed -i "s|^$key=.*|$kv|" "$CFG_OVR"
+      else
+        echo "$kv" >> "$CFG_OVR"
+      fi
+    done
+
     # --- 4. Сборка (выбор платы неинтерактивно, затем полная сборка) ---
     ./build.sh {{board}}
     ./build.sh
@@ -143,10 +188,54 @@ build: setup
     ls -lh /out
     SDK_EOF
 
+# Собрать прошивку и залить её на устройство: сначала выполняется build
+# (все модификации + сборка), затем плата переводится в loader mode по ssh
+# (кнопка BOOT не нужна) и свежий update.img шьётся через upgrade_tool.
+update: build
+    #!/usr/bin/env bash
+    set -euo pipefail
+    IMG={{justfile_directory()}}/update.img
+    TOOL={{justfile_directory()}}/upgrade_tool
+    [ -f "$IMG" ] || { echo "ERROR: $IMG не найден"; exit 1; }
+
+    # --- 1. Перевод платы в download mode (если она ещё не там) ---
+    # reboot(LINUX_REBOOT_CMD_RESTART2, "loader") — то же, что `reboot loader`
+    # на Rockchip; busybox reboot так не умеет, поэтому syscall через python.
+    if ! lsusb | grep -q '2207:350f'; then
+      echo ">> Перевожу {{device}} в loader mode по ssh..."
+      ssh -o BatchMode=yes -o ConnectTimeout=10 {{device}} \
+        'python3 -c "import ctypes; libc=ctypes.CDLL(None,use_errno=True); libc.syscall(88, 0xfee1dead, 672274793, 0xa1b2c3d4, ctypes.c_char_p(b"loader"))"' \
+        || echo ">> ssh недоступен; если плата не перейдёт в download mode — зажмите BOOT при подаче питания"
+    fi
+
+    # --- 2. Ожидание download-гаджета ---
+    echo ">> Жду устройство в download mode (2207:350f)..."
+    for i in $(seq 1 45); do
+      lsusb | grep -q '2207:350f' && break
+      sleep 1
+    done
+    lsusb | grep -q '2207:350f' \
+      || { echo "ERROR: плата не появилась как 2207:350f — зажмите BOOT при подаче питания и повторите"; exit 1; }
+
+    # --- 3. Прошивка ---
+    # upgrade_tool — статический бинарник: при недоступном sudo -n шьётся
+    # через privileged docker (root, доступ к /dev/bus/usb), пароль не нужен.
+    if sudo -n true 2>/dev/null; then
+      sudo -n "$TOOL" uf "$IMG"
+    elif sg docker -c 'docker info' >/dev/null 2>&1; then
+      echo ">> sudo без пароля недоступен — шью через privileged docker"
+      sg docker -c "docker run --rm --privileged \
+          -v /dev/bus/usb:/dev/bus/usb \
+          -v {{justfile_directory()}}:/out \
+          {{build_image}} /out/upgrade_tool uf /out/update.img"
+    else
+      sudo "$TOOL" uf "$IMG"
+    fi
+    echo ">> Прошивка завершена; плата перезагрузится сама."
+
 # Интерактивный шелл в сборочном окружении (для отладки)
 shell:
     sg docker -c 'docker run --rm -it -v {{sdk_volume}}:{{sdk_dir}} -v {{justfile_directory()}}:/out {{build_image}} bash'
-
 # Удалить volume с SDK (следующая сборка начнётся с состояния чистого образа)
 reset:
     sg docker -c 'docker volume rm {{sdk_volume}}'
