@@ -1,0 +1,6 @@
+Luckfox_Lyra_SDK_250815.tar.gz
+
+# Результаты сборки прошивки (just build)
+*.img
+*.bin
+*.txt

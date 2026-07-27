@@ -1,0 +1,3 @@
+# В build-контекст попадает только архив SDK
+*
+!Luckfox_Lyra_SDK_250815.tar.gz
