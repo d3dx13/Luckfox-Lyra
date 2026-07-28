@@ -37,7 +37,7 @@ default:
 setup:
     #!/usr/bin/env bash
     set -euo pipefail
-    sg docker -c 'docker build -t {{build_image}} -' <<'EOF'
+    docker build -t {{build_image}} - <<'EOF'
     FROM {{base_image}}
     ENV DEBIAN_FRONTEND=noninteractive
     RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -55,11 +55,11 @@ setup:
 build: setup
     #!/usr/bin/env bash
     set -euo pipefail
-    sg docker -c "docker run --rm -i \
+    docker run --rm -i \
         -v {{sdk_volume}}:{{sdk_dir}} \
         -v {{justfile_directory()}}:/out \
         -e HOST_UID=$(id -u) -e HOST_GID=$(id -g) \
-        {{build_image}} bash -s" <<'SDK_EOF'
+        {{build_image}} bash -s <<'SDK_EOF'
     set -euo pipefail
     # Сборка с минимальным приоритетом CPU, чтобы не душить остальную систему
     renice -n 19 $$ >/dev/null 2>&1 || true
@@ -222,12 +222,12 @@ update: build
     # через privileged docker (root, доступ к /dev/bus/usb), пароль не нужен.
     if sudo -n true 2>/dev/null; then
       sudo -n "$TOOL" uf "$IMG"
-    elif sg docker -c 'docker info' >/dev/null 2>&1; then
+    elif docker info >/dev/null 2>&1; then
       echo ">> sudo без пароля недоступен — шью через privileged docker"
-      sg docker -c "docker run --rm --privileged \
+      docker run --rm --privileged \
           -v /dev/bus/usb:/dev/bus/usb \
           -v {{justfile_directory()}}:/out \
-          {{build_image}} /out/upgrade_tool uf /out/update.img"
+          {{build_image}} /out/upgrade_tool uf /out/update.img
     else
       sudo "$TOOL" uf "$IMG"
     fi
@@ -235,7 +235,7 @@ update: build
 
 # Интерактивный шелл в сборочном окружении (для отладки)
 shell:
-    sg docker -c 'docker run --rm -it -v {{sdk_volume}}:{{sdk_dir}} -v {{justfile_directory()}}:/out {{build_image}} bash'
+    docker run --rm -it -v {{sdk_volume}}:{{sdk_dir}} -v {{justfile_directory()}}:/out {{build_image}} bash
 # Удалить volume с SDK (следующая сборка начнётся с состояния чистого образа)
 reset:
-    sg docker -c 'docker volume rm {{sdk_volume}}'
+    docker volume rm {{sdk_volume}}
