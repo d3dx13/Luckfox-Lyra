@@ -173,6 +173,18 @@ build: setup
       fi
     done
 
+    # --- 3d. Параметры изоляции в cmdline ядра (для cu-lyra-app) ---
+    # bootargs на этой прошивке берутся из dts chosen — CMDLINE из
+    # parameter.txt u-boot игнорирует (проверено: в /proc/cmdline платы нет
+    # ни mtdparts, ни uuid:rootfs). Поэтому параметры вставляются в начало
+    # строки bootargs в dts: сначала вырезаются прежние вхождения этих пяти
+    # параметров (иначе правка ISO не применяется при повторной сборке —
+    # dts уже содержит старую строку), затем вставляется актуальная.
+    # Строка должна совпадать с require_cmdline в copperconfig.ron приложения.
+    ISO="isolcpus=domain,managed,1,2 nohz_full=1,2 rcu_nocbs=1,2 kthread_cpus=0 irqaffinity=0"
+    sed -i -E 's/(isolcpus|nohz_full|rcu_nocbs|irqaffinity|kthread_cpus)=[^" ]* ?//g' "$DTS"
+    sed -i "s|bootargs = \"|bootargs = \"$ISO |" "$DTS"
+
     # --- 4. Сборка (выбор платы неинтерактивно, затем полная сборка) ---
     ./build.sh {{board}}
     ./build.sh
